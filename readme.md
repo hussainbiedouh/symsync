@@ -1,14 +1,12 @@
 # 📁 SymSync
 
-A Windows utility that creates and maintains symbolic links between directories, with real-time synchronization and system tray support! 🔄
+A Windows utility that creates and maintains symbolic links between directories, with real-time synchronization 🔄
 
 ## ✨ Features
 
 - 🔗 Creates symbolic links from a source directory to a target directory
 - 👀 Monitors source directory for changes in real-time with recursive subdirectory watching
 - 🔄 Automatically updates links when files are created, modified, moved or deleted
-- 🖥️ Minimizes to system tray with a fancy gradient icon
-- 🎨 Clean and intuitive GUI interface with light blue theme
 - 🛡️ Runs with administrative privileges for proper link management
 - 📊 Shows detailed status updates for each operation
 
@@ -19,7 +17,6 @@ A Windows utility that creates and maintains symbolic links between directories,
 3. Select your target directory using the Browse button 🔍
 4. Click "Create Links" to start the process
 5. The application will create links and continue monitoring for changes
-6. Minimize to system tray to keep running in background
 
 ## 💡 Use Cases
 
