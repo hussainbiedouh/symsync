@@ -1,26 +1,29 @@
 # 📁 SymSync
 
-A Windows utility that creates and maintains symbolic links between directories, with real-time synchronization 🔄
+A Windows utility that creates and maintains symbolic links between multiple source directories and a target directory, with real-time synchronization and system tray support! 🔄
 
 ## ✨ Features
 
-- 🔗 Creates symbolic links from a source directory to a target directory
-- 👀 Monitors source directory for changes in real-time with recursive subdirectory watching
+- 🔗 Creates symbolic links from multiple source directories to a target directory
+- 👀 Monitors source directories for changes in real-time with recursive subdirectory watching
 - 🔄 Automatically updates links when files are created, modified, moved or deleted
+- 🎨 Clean and intuitive GUI interface with light blue theme
 - 🛡️ Runs with administrative privileges for proper link management
 - 📊 Shows detailed status updates for each operation
+- 🎯 Easily add and remove watched source directories
+- 🔄 Seamlessly change target directory with option to clean up old links
 
 ## 🚀 Getting Started
 
 1. Run the application as Administrator (required for creating symbolic links)
-2. Select your source directory using the Browse button 🔍
-3. Select your target directory using the Browse button 🔍
-4. Click "Create Links" to start the process
-5. The application will create links and continue monitoring for changes
+2. Select your target directory using the Browse button 🔍
+3. Click "+ Add Source" to select source directories to watch
+4. The application will create links and continue monitoring for changes
+5. Use the "-" button next to each source to stop watching and remove its links
 
 ## 💡 Use Cases
 
-- 🎮 Link game mods folders to multiple locations
+- 🎮 Link game mods folders from multiple locations
 - 📂 Create synchronized backup structures
 - 🔄 Maintain mirror directories without duplicating files
 - 📱 Share files between different applications
@@ -31,17 +34,17 @@ A Windows utility that creates and maintains symbolic links between directories,
 - Administrative privileges
 - Python 3.x
 - Required packages: 
-  - tkinter (GUI framework)
-  - watchdog (file system monitoring)
-  - pystray (system tray support)
-  - Pillow (image handling)
+  - watchdog>=3.0.0 (file system monitoring)
+  - Pillow>=10.0.0 (image handling)
+  - pystray>=0.19.0 (system tray support)
+  - tkinter>=8.6 (GUI framework)
 
 ## 🛠️ Installation
 
 1. Clone this repository
 2. Install required packages:
    ```bash
-   pip install watchdog pystray Pillow
+   pip install -r requirements.txt
    ```
 3. Run the script:
    ```bash
@@ -65,9 +68,11 @@ This project is licensed under the GNU General Public License v3.0 (GPL-3.0) - s
 ## ⚠️ Important Notes
 
 - The application requires administrative privileges to create symbolic links
-- Both source and target directories must exist before creating links
+- Target directory must be selected before adding source directories
 - The application watches subdirectories recursively for changes
-- Closing the main window minimizes to system tray with a blue-purple gradient icon
-- System tray menu provides options to Show window or Exit
+- Closing the main window minimizes to system tray with a stylish "SS" gradient icon
+- System tray menu provides options to Restore window or Quit
 - Status updates are shown in real-time for all link operations
-- Window size is 600x300 pixels with resizable frame
+- Window size is 600x400 pixels with resizable frame
+- Sources can be added and removed dynamically
+- Target directory can be changed with option to clean up old links
