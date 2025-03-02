@@ -46,13 +46,35 @@ class FolderChangeHandler(FileSystemEventHandler):
             target (str): Target directory path 
             status_text (StringVar): For updating GUI status
         """
-        self.source = source
+        self.source = os.path.normpath(source)
         self.target = target
         self.status_text = status_text
         super().__init__()
 
+    def _is_direct_child(self, path):
+        """Check if the path is a direct child of the source directory"""
+        # Split the path into parts
+        path_parts = os.path.normpath(path).split(os.sep)
+        source_parts = self.source.split(os.sep)
+        
+        # Direct child means path has exactly one more component than source
+        if len(path_parts) != len(source_parts) + 1:
+            return False
+            
+        # Check if all source parts match the beginning of path
+        for i in range(len(source_parts)):
+            if source_parts[i].lower() != path_parts[i].lower():
+                return False
+                
+        return True
+
     def on_created(self, event):
         """Handle file/directory creation events"""
+        # Check if the file is a direct child of source
+        if not self._is_direct_child(event.src_path):
+            print(f"[DEBUG] Skipping non-direct child: {event.src_path}")
+            return
+            
         if event.is_directory:
             cmd = f'mklink /D "{os.path.join(self.target, os.path.basename(event.src_path))}" "{event.src_path}"'
         else:
@@ -63,8 +85,12 @@ class FolderChangeHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         """Handle file/directory deletion events"""
+        # Check if the file is a direct child of source
+        if not self._is_direct_child(event.src_path):
+            return
+            
         target_path = os.path.join(self.target, os.path.basename(event.src_path))
-        if os.path.lexists(target_path):  # Use lexists to check for broken symlinks
+        if os.path.lexists(target_path):
             if os.path.isdir(target_path):
                 cmd = f'rmdir "{target_path}"'
             else:
@@ -74,9 +100,13 @@ class FolderChangeHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         """Handle file modification events"""
+        # Check if the file is a direct child of source
+        if not self._is_direct_child(event.src_path):
+            return
+            
         if not event.is_directory:
             target_path = os.path.join(self.target, os.path.basename(event.src_path))
-            if os.path.lexists(target_path):  # Use lexists to check for broken symlinks
+            if os.path.lexists(target_path):
                 if os.path.isdir(target_path):
                     cmd = f'rmdir "{target_path}"'
                 else:
@@ -89,15 +119,23 @@ class FolderChangeHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         """Handle file/directory move/rename events"""
+        src_is_direct = self._is_direct_child(event.src_path)
+        dest_is_direct = self._is_direct_child(event.dest_path)
+        
+        if not (src_is_direct or dest_is_direct):
+            return
+            
         old_target = os.path.join(self.target, os.path.basename(event.src_path))
         new_target = os.path.join(self.target, os.path.basename(event.dest_path))
-        if os.path.lexists(old_target):  # Use lexists to check for broken symlinks
+        
+        if src_is_direct and os.path.lexists(old_target):
             if os.path.isdir(old_target):
                 cmd = f'rmdir "{old_target}"'
             else:
                 cmd = f'del /f "{old_target}"'
             execute_admin_command(cmd)
-            
+        
+        if dest_is_direct:
             if event.is_directory:
                 cmd = f'mklink /D "{new_target}" "{event.dest_path}"'
             else:
