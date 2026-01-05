@@ -1,5 +1,6 @@
 # Import required modules
 import os  # For file system operations
+import sys  # For system operations
 import ctypes  # For checking admin privileges
 import subprocess  # For running system commands
 import tkinter as tk  # GUI framework
@@ -9,6 +10,64 @@ from watchdog.events import FileSystemEventHandler  # For handling file system e
 from PIL import Image, ImageDraw, ImageTk  # For image handling and icons
 import pystray  # For system tray integration
 import threading  # For running the tray icon in a separate thread
+import json  # For settings persistence
+import tempfile  # For system temp folder
+import uuid  # For unique link IDs
+import msvcrt  # For file locking (Windows)
+
+# Settings and lock file paths
+SETTINGS_FILE = os.path.join(tempfile.gettempdir(), "symsync_settings.json")
+LOCK_FILE = os.path.join(tempfile.gettempdir(), "symsync.lock")
+
+# Modern LIGHT color palette
+COLORS = {
+    'bg_primary': '#ffffff',         # White background
+    'bg_secondary': '#f8f9fa',       # Light gray background
+    'bg_hover': '#e9ecef',           # Hover background
+    'accent': '#4361ee',             # Primary accent (blue)
+    'accent_hover': '#3a56d4',       # Accent hover
+    'accent_light': '#e8ecff',       # Light accent
+    'success': '#10b981',            # Success green
+    'success_light': '#d1fae5',      # Light green
+    'warning': '#f59e0b',            # Warning yellow
+    'danger': '#ef4444',             # Danger red
+    'danger_light': '#fee2e2',       # Light red
+    'text_primary': '#1f2937',       # Dark text
+    'text_secondary': '#6b7280',     # Gray text
+    'text_muted': '#9ca3af',         # Muted text
+    'border': '#e5e7eb',             # Border color
+    'border_focus': '#4361ee',       # Focus border
+    'card_bg': '#ffffff',            # Card background
+    'shadow': '#00000010',           # Shadow color
+}
+
+
+class SingleInstance:
+    """Ensures only one instance of the application runs"""
+    def __init__(self):
+        self.lock_file = None
+        self.is_locked = False
+    
+    def try_lock(self):
+        """Try to acquire the lock. Returns True if successful."""
+        try:
+            self.lock_file = open(LOCK_FILE, 'w')
+            msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            self.is_locked = True
+            return True
+        except (IOError, OSError):
+            return False
+    
+    def release(self):
+        """Release the lock"""
+        if self.lock_file:
+            try:
+                if self.is_locked:
+                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                self.lock_file.close()
+            except:
+                pass
+
 
 def is_admin():
     """Check if the script is running with administrative privileges"""
@@ -18,17 +77,12 @@ def is_admin():
         return False
 
 def execute_admin_command(command):
-    """Execute a command with administrative privileges
-    Args:
-        command (str): Command to execute
-    Returns:
-        bool: True if command executed successfully, False otherwise
-    """
+    """Execute a command with administrative privileges"""
     try:
-        print(f"Executing command: {command}")  # Debug: Show the command being executed
+        print(f"Executing command: {command}")
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         if result.stderr:
-            print(f"Error: {result.stderr}")  # Debug: Print error output from the command
+            print(f"Error: {result.stderr}")
             return False
         else:
             print(f"Output: {result.stdout}")
@@ -37,31 +91,57 @@ def execute_admin_command(command):
         print(f"Execution failed: {e}")
         return False
 
+
+class LinkConfiguration:
+    """Represents a single link configuration with multiple sources → one target"""
+    def __init__(self, name="New Link", target_path="", link_id=None):
+        self.id = link_id or str(uuid.uuid4())[:8]
+        self.name = name
+        self.target_path = target_path
+        self.sources = {}  # source_path -> observer
+        self.is_active = False
+        self.status = "Not configured"
+    
+    def to_dict(self):
+        """Serialize to dictionary for JSON storage"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "target_path": self.target_path,
+            "sources": list(self.sources.keys()),
+            "is_active": self.is_active
+        }
+    
+    @classmethod
+    def from_dict(cls, data):
+        """Create LinkConfiguration from dictionary"""
+        link = cls(
+            name=data.get("name", "New Link"),
+            target_path=data.get("target_path", ""),
+            link_id=data.get("id")
+        )
+        for source in data.get("sources", []):
+            link.sources[source] = None
+        link.is_active = data.get("is_active", False)
+        return link
+
+
 class FolderChangeHandler(FileSystemEventHandler):
     """Handles file system events for the watched folder"""
-    def __init__(self, source, target, status_text):
-        """Initialize the handler
-        Args:
-            source (str): Source directory path
-            target (str): Target directory path 
-            status_text (StringVar): For updating GUI status
-        """
+    def __init__(self, source, target, update_status_callback):
         self.source = os.path.normpath(source)
         self.target = target
-        self.status_text = status_text
+        self.update_status = update_status_callback
         super().__init__()
 
     def _is_direct_child(self, path):
         """Check if the path is a direct child of the source directory"""
-        # Split the path into parts
         path_parts = os.path.normpath(path).split(os.sep)
         source_parts = self.source.split(os.sep)
         
-        # Direct child means path has exactly one more component than source
         if len(path_parts) != len(source_parts) + 1:
             return False
             
-        # Check if all source parts match the beginning of path
         for i in range(len(source_parts)):
             if source_parts[i].lower() != path_parts[i].lower():
                 return False
@@ -69,23 +149,27 @@ class FolderChangeHandler(FileSystemEventHandler):
         return True
 
     def on_created(self, event):
-        """Handle file/directory creation events"""
-        # Check if the file is a direct child of source
         if not self._is_direct_child(event.src_path):
-            print(f"[DEBUG] Skipping non-direct child: {event.src_path}")
             return
             
-        if event.is_directory:
-            cmd = f'mklink /D "{os.path.join(self.target, os.path.basename(event.src_path))}" "{event.src_path}"'
-        else:
-            cmd = f'mklink "{os.path.join(self.target, os.path.basename(event.src_path))}" "{event.src_path}"'
+        target_path = os.path.join(self.target, os.path.basename(event.src_path))
         
-        self.status_text.set(f"Creating link for new item: {cmd}")
-        execute_admin_command(cmd)
+        if os.path.lexists(target_path) and event.is_directory and os.path.isdir(target_path):
+            self.update_status(f"Merging: {os.path.basename(event.src_path)}")
+            merge_directory_contents(event.src_path, target_path, self.update_status)
+        else:
+            if os.path.lexists(target_path):
+                return
+                
+            if event.is_directory:
+                cmd = f'mklink /D "{target_path}" "{event.src_path}"'
+            else:
+                cmd = f'mklink "{target_path}" "{event.src_path}"'
+            
+            self.update_status(f"Created: {os.path.basename(event.src_path)}")
+            execute_admin_command(cmd)
 
     def on_deleted(self, event):
-        """Handle file/directory deletion events"""
-        # Check if the file is a direct child of source
         if not self._is_direct_child(event.src_path):
             return
             
@@ -95,12 +179,10 @@ class FolderChangeHandler(FileSystemEventHandler):
                 cmd = f'rmdir "{target_path}"'
             else:
                 cmd = f'del /f "{target_path}"'
-            self.status_text.set(f"Removing link: {cmd}")
+            self.update_status(f"Removed: {os.path.basename(event.src_path)}")
             execute_admin_command(cmd)
 
     def on_modified(self, event):
-        """Handle file modification events"""
-        # Check if the file is a direct child of source
         if not self._is_direct_child(event.src_path):
             return
             
@@ -114,11 +196,10 @@ class FolderChangeHandler(FileSystemEventHandler):
                 execute_admin_command(cmd)
                 
                 cmd = f'mklink "{target_path}" "{event.src_path}"'
-                self.status_text.set(f"Updating link: {cmd}")
+                self.update_status(f"Updated: {os.path.basename(event.src_path)}")
                 execute_admin_command(cmd)
 
     def on_moved(self, event):
-        """Handle file/directory move/rename events"""
         src_is_direct = self._is_direct_child(event.src_path)
         dest_is_direct = self._is_direct_child(event.dest_path)
         
@@ -136,343 +217,888 @@ class FolderChangeHandler(FileSystemEventHandler):
             execute_admin_command(cmd)
         
         if dest_is_direct:
-            if event.is_directory:
-                cmd = f'mklink /D "{new_target}" "{event.dest_path}"'
+            if os.path.lexists(new_target) and event.is_directory and os.path.isdir(new_target):
+                self.update_status(f"Merging: {os.path.basename(event.dest_path)}")
+                merge_directory_contents(event.dest_path, new_target, self.update_status)
             else:
-                cmd = f'mklink "{new_target}" "{event.dest_path}"'
-            self.status_text.set(f"Moving link: {cmd}")
-            execute_admin_command(cmd)
+                if os.path.lexists(new_target):
+                    return
+                    
+                if event.is_directory:
+                    cmd = f'mklink /D "{new_target}" "{event.dest_path}"'
+                else:
+                    cmd = f'mklink "{new_target}" "{event.dest_path}"'
+                self.update_status(f"Moved: {os.path.basename(event.dest_path)}")
+                execute_admin_command(cmd)
 
-def create_symlinks(source, target, status_text):
-    """Create symbolic links from source to target directory
-    Args:
-        source (str): Source directory path
-        target (str): Target directory path
-        status_text (StringVar): For updating GUI status
-    """
+
+def merge_directory_contents(source_dir, target_dir, update_status):
+    """Merge contents of source_dir into target_dir by creating symlinks."""
+    success_count = 0
+    
+    if os.path.islink(target_dir):
+        actual_target_dir = os.readlink(target_dir)
+    else:
+        actual_target_dir = target_dir
+    
+    if not os.path.exists(actual_target_dir):
+        os.makedirs(actual_target_dir)
+    
+    for item in os.listdir(source_dir):
+        source_path = os.path.normpath(os.path.join(source_dir, item))
+        symlink_path = os.path.normpath(os.path.join(actual_target_dir, item))
+        
+        if os.path.lexists(symlink_path):
+            if os.path.isdir(source_path) and os.path.isdir(symlink_path):
+                success_count += merge_directory_contents(source_path, symlink_path, update_status)
+                continue
+            else:
+                continue
+        
+        if os.path.isdir(source_path):
+            cmd = f'mklink /D "{symlink_path}" "{source_path}"'
+        else:
+            cmd = f'mklink "{symlink_path}" "{source_path}"'
+        
+        if execute_admin_command(cmd):
+            success_count += 1
+    
+    return success_count
+
+
+def create_symlinks_for_source(source, target, update_status):
+    """Create symlinks for a single source and start watching."""
     if not os.path.exists(source):
-        status_text.set(f"Source directory '{source}' does not exist")
-        return
+        update_status(f"Source not found: {source}")
+        return None
+    
     if not os.path.exists(target):
         os.makedirs(target)
-
+    
     success_count = 0
     for item in os.listdir(source):
         source_path = os.path.normpath(os.path.join(source, item))
         target_path = os.path.normpath(os.path.join(target, item))
-        
-        # Debug: Check existence of source file/folder and parent of target link
-        print(f"[DEBUG] Attempting to link:")
-        print(f"   Source: {source_path} (exists? {os.path.exists(source_path)})")
-        parent_dir = os.path.dirname(target_path)
-        print(f"   Target parent directory: {parent_dir} (exists? {os.path.exists(parent_dir)})")
 
-        if os.path.lexists(target_path):  # Use lexists to check for broken symlinks
-            status_text.set(f"Skipping '{target_path}', already exists")
-            continue
+        if os.path.lexists(target_path):
+            if os.path.isdir(source_path) and os.path.isdir(target_path):
+                success_count += merge_directory_contents(source_path, target_path, update_status)
+                continue
+            else:
+                continue
 
         if os.path.isdir(source_path):
             cmd = f'mklink /D "{target_path}" "{source_path}"'
         else:
             cmd = f'mklink "{target_path}" "{source_path}"'
         
-        status_text.set(f"Creating link: {cmd}")
         if execute_admin_command(cmd):
             success_count += 1
     
-    status_text.set(f"Operation completed! Created {success_count} links\nNow watching for changes...")
+    update_status(f"🔗 Linked {success_count} items from {os.path.basename(source)}")
 
-    # Set up watchdog observer with recursive=True to watch subdirectories
-    event_handler = FolderChangeHandler(source, target, status_text)
+    event_handler = FolderChangeHandler(source, target, update_status)
     observer = Observer()
     observer.schedule(event_handler, source, recursive=True)
     observer.start()
+    
+    return observer
 
-###############################################################################
-# NEW HELPER FUNCTIONS FOR MULTIPLE SOURCES
 
-def create_symlinks_for_source(source, target, status_text):
-    """Create symlinks for a given source's contents in a dedicated subfolder of target."""
-    if not os.path.exists(source):
-        status_text.set(f"Source directory '{source}' does not exist")
-        return None, None
-
-    # Directly use the target folder for symlinks
-    target_sub = target
-
-    success_count = 0
-    for item in os.listdir(source):
-        source_path = os.path.normpath(os.path.join(source, item))
-        symlink_path = os.path.normpath(os.path.join(target_sub, item))
+class ModernButton(tk.Canvas):
+    """A modern styled button with hover effects"""
+    def __init__(self, parent, text, command=None, style='primary', width=120, height=36, **kwargs):
+        super().__init__(parent, width=width, height=height, 
+                        highlightthickness=0, bg=COLORS['bg_primary'], **kwargs)
         
-        # Debug: Check existence of source file/folder and parent of symlink
-        print(f"[DEBUG] Attempting to link for source '{source}':")
-        print(f"   Source: {source_path} (exists? {os.path.exists(source_path)})")
-        parent_dir = os.path.dirname(symlink_path)
-        print(f"   Symlink parent directory: {parent_dir} (exists? {os.path.exists(parent_dir)})")
-
-        if os.path.lexists(symlink_path):
-            status_text.set(f"Skipping '{symlink_path}', already exists")
-            continue
-
-        if os.path.isdir(source_path):
-            cmd = f'mklink /D "{symlink_path}" "{source_path}"'
+        self.command = command
+        self.text = text
+        self.width = width
+        self.height = height
+        self.style = style
+        self.enabled = True
+        
+        self.styles = {
+            'primary': {
+                'bg': COLORS['accent'],
+                'hover': COLORS['accent_hover'],
+                'text': '#ffffff'
+            },
+            'success': {
+                'bg': COLORS['success'],
+                'hover': '#0ea271',
+                'text': '#ffffff'
+            },
+            'danger': {
+                'bg': COLORS['danger'],
+                'hover': '#dc2626',
+                'text': '#ffffff'
+            },
+            'secondary': {
+                'bg': COLORS['bg_secondary'],
+                'hover': COLORS['bg_hover'],
+                'text': COLORS['text_primary'],
+                'border': COLORS['border']
+            }
+        }
+        
+        self.current_bg = self.styles[style]['bg']
+        self.draw_button()
+        
+        self.bind('<Enter>', self.on_enter)
+        self.bind('<Leave>', self.on_leave)
+        self.bind('<Button-1>', self.on_click)
+    
+    def draw_button(self):
+        """Draw the rounded button"""
+        self.delete('all')
+        radius = 6
+        
+        bg_color = self.current_bg if self.enabled else COLORS['bg_hover']
+        
+        # Draw border for secondary style
+        if self.style == 'secondary' and self.enabled:
+            self.create_rounded_rect(1, 1, self.width-1, self.height-1, radius, 
+                                    fill=bg_color, outline=COLORS['border'])
         else:
-            cmd = f'mklink "{symlink_path}" "{source_path}"'
+            self.create_rounded_rect(1, 1, self.width-1, self.height-1, radius, 
+                                    fill=bg_color, outline='')
         
-        status_text.set(f"Creating link: {cmd}")
-        if execute_admin_command(cmd):
-            success_count += 1
-
-    status_text.set(f"Operation completed! Created {success_count} links for source '{source}'")
+        text_color = self.styles[self.style]['text'] if self.enabled else COLORS['text_muted']
+        self.create_text(self.width//2, self.height//2, text=self.text, 
+                        fill=text_color, font=('Segoe UI', 9, 'bold'))
     
-    # Start a watchdog observer for this source pointing to its subfolder
-    event_handler = FolderChangeHandler(source, target_sub, status_text)
-    observer = Observer()
-    observer.schedule(event_handler, source, recursive=True)
-    observer.start()
-
-    status_text.set(status_text.get() + "\nNow watching for changes...")
-    return observer, target_sub
-
-# Global dictionaries to track active watchers and UI items
-source_watchers = {}
-source_rows = {}
-
-def add_source():
-    """Triggered by the '+' button to add a new source to be watched."""
-    global source_watchers, source_rows
-    if not target_var.get():
-        messagebox.showwarning("Warning", "Please select the target directory first")
-        return
-    new_source = filedialog.askdirectory(title="Select Source Directory")
-    if not new_source:
-        return
-    # Ensure the selected source is not the same as the target directory
-    if os.path.normcase(os.path.normpath(new_source)) == os.path.normcase(os.path.normpath(target_var.get())):
-        messagebox.showwarning("Warning", "Source cannot be the same as the target!")
-        return
-    if new_source in source_watchers:
-        messagebox.showinfo("Info", f"Source '{new_source}' is already being watched")
-        return
+    def create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        """Create a rounded rectangle"""
+        points = [
+            x1+radius, y1, x2-radius, y1, x2, y1, x2, y1+radius,
+            x2, y2-radius, x2, y2, x2-radius, y2, x1+radius, y2,
+            x1, y2, x1, y2-radius, x1, y1+radius, x1, y1,
+        ]
+        return self.create_polygon(points, smooth=True, **kwargs)
     
-    # Create UI row inside the sources_frame
-    row_frame = ttk.Frame(sources_frame, style="Custom.TFrame")
-    row_frame.pack(fill='x', pady=2)
-    label = ttk.Label(row_frame, text=new_source, style="Custom.TLabel")
-    label.pack(side=tk.LEFT, padx=5, expand=True, anchor=tk.W)
-    remove_btn = ttk.Button(row_frame, text="-", style="Custom.TButton",
-                            command=lambda: remove_source(new_source))
-    remove_btn.pack(side=tk.RIGHT, padx=5)
-    source_rows[new_source] = row_frame
-
-    # Create symlinks for the new source and start its watchdog observer
-    observer, _ = create_symlinks_for_source(new_source, target_var.get(), status_var)
-    if observer is not None:
-        source_watchers[new_source] = observer
-
-def remove_source(source):
-    """Stop watching a source and remove its created symlinks from the target."""
-    global source_watchers, source_rows
-    # Stop the watchdog observer if active
-    if source in source_watchers:
-        observer = source_watchers[source]
-        observer.stop()
-        observer.join()
-        del source_watchers[source]
+    def on_enter(self, event):
+        if self.enabled:
+            self.current_bg = self.styles[self.style]['hover']
+            self.draw_button()
+            self.config(cursor='hand2')
     
-    # Remove symlinks in the target directory that belong to this source
-    target_directory = target_var.get()
-    for item in os.listdir(target_directory):
-         full_path = os.path.join(target_directory, item)
-         if os.path.islink(full_path):
-             try:
-                 link_target = os.readlink(full_path)
-                 # Check if the symlink's target starts with the removed source path (case-insensitive)
-                 if os.path.normcase(os.path.normpath(link_target)).startswith(os.path.normcase(os.path.normpath(source))):
-                     if os.path.isdir(full_path):
-                         cmd = f'rmdir "{full_path}"'
-                     else:
-                         cmd = f'del /f "{full_path}"'
-                     execute_admin_command(cmd)
-             except Exception as e:
-                 print(f"Error reading symlink: {full_path} - {e}")
-
-    # Remove the UI row for this source
-    if source in source_rows:
-        source_rows[source].destroy()
-        del source_rows[source]
+    def on_leave(self, event):
+        if self.enabled:
+            self.current_bg = self.styles[self.style]['bg']
+            self.draw_button()
     
-    status_var.set(f"Stopped watching source '{source}' and removed its links.")
-
-# New helper functions to handle target change cleanup
-def cleanup_target_symlinks(target):
-    """Remove all symlinks from the target directory."""
-    for item in os.listdir(target):
-         full_path = os.path.join(target, item)
-         if os.path.islink(full_path):
-              if os.path.isdir(full_path):
-                  cmd = f'rmdir "{full_path}"'
-              else:
-                  cmd = f'del /f "{full_path}"'
-              execute_admin_command(cmd)
-
-def change_target():
-    """Handle target directory change by asking user to remove symlinks in the current target."""
-    new_target = filedialog.askdirectory(title="Select Target Directory")
-    if new_target:
-         old_target = target_var.get()
-         # If there is an old target and it differs from the new one, ask for cleanup
-         if old_target and os.path.normcase(os.path.normpath(old_target)) != os.path.normcase(os.path.normpath(new_target)):
-              answer = messagebox.askyesno("Confirm", "Do you want to remove the symlinks that are already made in the current target?")
-              if answer:
-                   cleanup_target_symlinks(old_target)
-         target_var.set(new_target)
-         
-         # For each active source, update symlinks in the new target if they don't already exist.
-         # Stop the previous watchdog observer and reinitialize it for the new target.
-         for src, obs in list(source_watchers.items()):
-              obs.stop()
-              obs.join()
-              # Re-create symlinks for this source in the new target.
-              # The underlying function will skip creation of symlinks that are already present.
-              observer, _ = create_symlinks_for_source(src, new_target, status_var)
-              if observer is not None:
-                   source_watchers[src] = observer
-              else:
-                   # Optionally remove the source if creation fails.
-                   remove_source(src)
-
-def create_tray_image():
-    """Create a beautiful tray icon with letters 'SS'."""
-    from PIL import Image, ImageDraw, ImageFont
-    # Create a larger image for better quality
-    size = 128
-    image = Image.new('RGBA', (size, size), color=(0,0,0,0))
-    draw = ImageDraw.Draw(image)
+    def on_click(self, event):
+        if self.enabled and self.command:
+            self.command()
     
-    # Create a gradient background
-    for y in range(size):
-        r = int(100 + (y/size) * 50)  # Subtle red gradient
-        g = int(50 + (y/size) * 30)   # Subtle green gradient
-        b = int(200 + (y/size) * 55)  # Strong blue gradient
-        draw.line([(0, y), (size, y)], fill=(r, g, b))
-    
-    # Draw rounded corners
-    radius = 20
-    draw.rounded_rectangle([0, 0, size-1, size-1], radius, fill=None,
-                         outline=(255,255,255,128), width=3)
-    
-    # Add 'SS' text with larger font size 🔍
-    try:
-        font = ImageFont.truetype("arial.ttf", size=80)  # Increased from 60 to 80
-    except:
-        font = ImageFont.load_default()
-    
-    # Center the text
-    text = "SS"
-    text_bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = text_bbox[2] - text_bbox[0]
-    text_height = text_bbox[3] - text_bbox[1]
-    x = (size - text_width) // 2
-    y = (size - text_height) // 2
-    
-    # Draw text with white color and slight shadow
-    draw.text((x+2, y+2), text, font=font, fill=(0,0,0,128))  # Shadow
-    draw.text((x, y), text, font=font, fill=(255,255,255))  # Main text
-    
-    # Resize to final dimensions while maintaining quality
-    return image.resize((64, 64), Image.Resampling.LANCZOS)
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+        self.current_bg = self.styles[self.style]['bg']
+        self.draw_button()
+        self.config(cursor='hand2' if enabled else 'arrow')
 
-def restore_window(icon, item):
-    """Callback to restore the app window from the tray."""
-    root.deiconify()
-    root.state('normal')
-    icon.stop()
 
-def quit_app(icon, item):
-    """Callback to quit the application using the tray icon."""
-    icon.stop()
-    root.destroy()
+class ModernEntry(tk.Frame):
+    """A modern styled entry with border"""
+    def __init__(self, parent, textvariable=None, width=40, **kwargs):
+        super().__init__(parent, bg=COLORS['bg_primary'])
+        
+        self.border_frame = tk.Frame(self, bg=COLORS['border'], padx=1, pady=1)
+        self.border_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.entry = tk.Entry(self.border_frame, 
+                             textvariable=textvariable,
+                             font=('Segoe UI', 10),
+                             bg=COLORS['bg_primary'],
+                             fg=COLORS['text_primary'],
+                             insertbackground=COLORS['accent'],
+                             relief='flat',
+                             width=width)
+        self.entry.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        
+        self.entry.bind('<FocusIn>', self.on_focus_in)
+        self.entry.bind('<FocusOut>', self.on_focus_out)
+    
+    def on_focus_in(self, event):
+        self.border_frame.config(bg=COLORS['accent'])
+    
+    def on_focus_out(self, event):
+        self.border_frame.config(bg=COLORS['border'])
+    
+    def config(self, **kwargs):
+        if 'state' in kwargs:
+            self.entry.config(state=kwargs['state'])
 
-def start_tray_icon():
-    """Create and run the tray icon."""
-    image = create_tray_image()
-    tray_icon = pystray.Icon("Folder Linker", image, "Folder Linker", menu=pystray.Menu(
-        pystray.MenuItem("Restore", restore_window),
-        pystray.MenuItem("Quit", quit_app)
-    ))
-    tray_icon.run()
 
-def minimize_to_tray(event=None):
-    """When minimized, hide the window and show the system tray icon."""
-    if root.state() == 'iconic':
-        root.withdraw()
-        threading.Thread(target=start_tray_icon, daemon=True).start()
+class SymSyncApp:
+    """Main application class with modern light theme UI"""
+    
+    def __init__(self, root, single_instance):
+        self.root = root
+        self.single_instance = single_instance
+        self.root.title("SymSync")
+        self.root.geometry("1050x720")
+        self.root.configure(bg=COLORS['bg_secondary'])
+        self.root.minsize(900, 600)
+        
+        self.links = {}
+        self.selected_link_id = None
+        
+        self.setup_icon()
+        self.create_ui()
+        self.load_settings()
+        
+        self.root.bind("<Unmap>", self.minimize_to_tray)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def setup_icon(self):
+        """Set up the application and tray icon"""
+        tray_img_pil = self.create_tray_image()
+        self.tray_img_tk = ImageTk.PhotoImage(tray_img_pil)
+        self.root.iconphoto(True, self.tray_img_tk)
+    
+    def create_tray_image(self):
+        """Create a modern tray icon"""
+        from PIL import ImageFont
+        size = 128
+        image = Image.new('RGBA', (size, size), color=(0,0,0,0))
+        draw = ImageDraw.Draw(image)
+        
+        # Blue gradient background
+        for y in range(size):
+            ratio = y / size
+            r = int(67 * (1 - ratio) + 99 * ratio)
+            g = int(97 * (1 - ratio) + 102 * ratio)  
+            b = int(238 * (1 - ratio) + 241 * ratio)
+            draw.line([(0, y), (size, y)], fill=(r, g, b))
+        
+        radius = 24
+        draw.rounded_rectangle([0, 0, size-1, size-1], radius, fill=None,
+                             outline=(255,255,255,200), width=4)
+        
+        try:
+            font = ImageFont.truetype("segoeui.ttf", size=72)
+        except:
+            try:
+                font = ImageFont.truetype("arial.ttf", size=72)
+            except:
+                font = ImageFont.load_default()
+        
+        text = "SS"
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        x = (size - text_width) // 2
+        y = (size - text_height) // 2 - 5
+        
+        draw.text((x+2, y+2), text, font=font, fill=(0,0,0,60))
+        draw.text((x, y), text, font=font, fill=(255,255,255))
+        
+        return image.resize((64, 64), Image.Resampling.LANCZOS)
+    
+    def create_ui(self):
+        """Create the main modern UI"""
+        main_container = tk.Frame(self.root, bg=COLORS['bg_secondary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        self.create_header(main_container)
+        
+        content = tk.Frame(main_container, bg=COLORS['bg_secondary'])
+        content.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
+        
+        self.create_left_pane(content)
+        self.create_right_pane(content)
+    
+    def create_header(self, parent):
+        """Create the header with logo and title"""
+        header = tk.Frame(parent, bg=COLORS['bg_secondary'], height=50)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        
+        title_frame = tk.Frame(header, bg=COLORS['bg_secondary'])
+        title_frame.pack(side=tk.LEFT)
+        
+        # Icon circle
+        icon_canvas = tk.Canvas(title_frame, width=40, height=40, 
+                               bg=COLORS['bg_secondary'], highlightthickness=0)
+        icon_canvas.pack(side=tk.LEFT, padx=(0, 10))
+        icon_canvas.create_oval(2, 2, 38, 38, fill=COLORS['accent'], outline='')
+        icon_canvas.create_text(20, 20, text="🔗", font=('Segoe UI Emoji', 14), fill='white')
+        
+        title = tk.Label(title_frame, text="SymSync", font=('Segoe UI', 20, 'bold'),
+                        bg=COLORS['bg_secondary'], fg=COLORS['text_primary'])
+        title.pack(side=tk.LEFT)
+        
+        subtitle = tk.Label(title_frame, text="Symbolic Link Manager", 
+                           font=('Segoe UI', 11),
+                           bg=COLORS['bg_secondary'], fg=COLORS['text_muted'])
+        subtitle.pack(side=tk.LEFT, padx=(12, 0), pady=(6, 0))
+    
+    def create_left_pane(self, parent):
+        """Create the left pane with links list"""
+        # Card container
+        left_card = tk.Frame(parent, bg=COLORS['card_bg'], width=250)
+        left_card.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 15))
+        left_card.pack_propagate(False)
+        
+        # Add subtle border
+        left_card.config(highlightbackground=COLORS['border'], highlightthickness=1)
+        
+        inner = tk.Frame(left_card, bg=COLORS['card_bg'])
+        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        header = tk.Label(inner, text="LINKS", font=('Segoe UI', 9, 'bold'),
+                         bg=COLORS['card_bg'], fg=COLORS['text_muted'])
+        header.pack(anchor=tk.W, pady=(0, 12))
+        
+        self.new_link_btn = ModernButton(inner, text="+ New Link", 
+                                         command=self.create_new_link,
+                                         style='primary', width=220)
+        self.new_link_btn.pack(fill=tk.X, pady=(0, 15))
+        
+        # Links list
+        list_frame = tk.Frame(inner, bg=COLORS['bg_secondary'], 
+                             highlightbackground=COLORS['border'], highlightthickness=1)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(list_frame, bg=COLORS['bg_secondary'])
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.links_listbox = tk.Listbox(list_frame, 
+                                        yscrollcommand=scrollbar.set,
+                                        font=('Segoe UI', 10),
+                                        bg=COLORS['bg_primary'],
+                                        fg=COLORS['text_primary'],
+                                        selectbackground=COLORS['accent_light'],
+                                        selectforeground=COLORS['text_primary'],
+                                        activestyle='none',
+                                        relief='flat',
+                                        highlightthickness=0,
+                                        bd=0)
+        self.links_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        scrollbar.config(command=self.links_listbox.yview)
+        
+        self.links_listbox.bind('<<ListboxSelect>>', self.on_link_selected)
+    
+    def create_right_pane(self, parent):
+        """Create the right pane with link details"""
+        # Card container
+        right_card = tk.Frame(parent, bg=COLORS['card_bg'])
+        right_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right_card.config(highlightbackground=COLORS['border'], highlightthickness=1)
+        
+        self.detail_inner = tk.Frame(right_card, bg=COLORS['card_bg'])
+        self.detail_inner.pack(fill=tk.BOTH, expand=True, padx=25, pady=20)
+        
+        header = tk.Label(self.detail_inner, text="LINK DETAILS", 
+                         font=('Segoe UI', 9, 'bold'),
+                         bg=COLORS['card_bg'], fg=COLORS['text_muted'])
+        header.pack(anchor=tk.W, pady=(0, 20))
+        
+        form = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
+        form.pack(fill=tk.X)
+        
+        # Name field
+        name_row = tk.Frame(form, bg=COLORS['card_bg'])
+        name_row.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(name_row, text="Name", font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor=tk.W)
+        
+        self.name_var = tk.StringVar()
+        self.name_entry = ModernEntry(name_row, textvariable=self.name_var, width=50)
+        self.name_entry.pack(fill=tk.X, pady=(6, 0))
+        self.name_var.trace_add("write", self.on_name_changed)
+        
+        # Target field
+        target_row = tk.Frame(form, bg=COLORS['card_bg'])
+        target_row.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(target_row, text="Target Directory", font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor=tk.W)
+        
+        target_input_row = tk.Frame(target_row, bg=COLORS['card_bg'])
+        target_input_row.pack(fill=tk.X, pady=(6, 0))
+        
+        self.target_var = tk.StringVar()
+        self.target_entry = ModernEntry(target_input_row, textvariable=self.target_var, width=45)
+        self.target_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.browse_target_btn = ModernButton(target_input_row, text="Browse", 
+                                              command=self.browse_target,
+                                              style='secondary', width=80, height=34)
+        self.browse_target_btn.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Sources section
+        sources_frame = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
+        sources_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        
+        sources_header = tk.Frame(sources_frame, bg=COLORS['card_bg'])
+        sources_header.pack(fill=tk.X)
+        
+        tk.Label(sources_header, text="Source Directories", font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side=tk.LEFT)
+        
+        sources_btn_frame = tk.Frame(sources_header, bg=COLORS['card_bg'])
+        sources_btn_frame.pack(side=tk.RIGHT)
+        
+        self.add_source_btn = ModernButton(sources_btn_frame, text="+ Add", 
+                                           command=self.add_source,
+                                           style='primary', width=70, height=28)
+        self.add_source_btn.pack(side=tk.LEFT, padx=3)
+        
+        self.remove_source_btn = ModernButton(sources_btn_frame, text="- Remove", 
+                                              command=self.remove_source,
+                                              style='danger', width=80, height=28)
+        self.remove_source_btn.pack(side=tk.LEFT, padx=3)
+        
+        # Sources list
+        sources_list_frame = tk.Frame(sources_frame, bg=COLORS['bg_secondary'],
+                                     highlightbackground=COLORS['border'], highlightthickness=1)
+        sources_list_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        
+        sources_scrollbar = tk.Scrollbar(sources_list_frame)
+        sources_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.sources_listbox = tk.Listbox(sources_list_frame,
+                                          yscrollcommand=sources_scrollbar.set,
+                                          font=('Segoe UI', 9),
+                                          bg=COLORS['bg_primary'],
+                                          fg=COLORS['text_primary'],
+                                          selectbackground=COLORS['accent_light'],
+                                          selectforeground=COLORS['accent'],
+                                          activestyle='none',
+                                          relief='flat',
+                                          highlightthickness=0,
+                                          height=5)
+        self.sources_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        sources_scrollbar.config(command=self.sources_listbox.yview)
+        
+        # Status section
+        status_frame = tk.Frame(self.detail_inner, bg=COLORS['bg_secondary'],
+                               highlightbackground=COLORS['border'], highlightthickness=1)
+        status_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        status_inner = tk.Frame(status_frame, bg=COLORS['bg_secondary'])
+        status_inner.pack(fill=tk.X, padx=15, pady=12)
+        
+        tk.Label(status_inner, text="STATUS", font=('Segoe UI', 8, 'bold'),
+                bg=COLORS['bg_secondary'], fg=COLORS['text_muted']).pack(anchor=tk.W)
+        
+        self.status_var = tk.StringVar(value="✨ Select or create a link to begin")
+        self.status_label = tk.Label(status_inner, textvariable=self.status_var,
+                                    font=('Segoe UI', 10, 'bold'),
+                                    bg=COLORS['bg_secondary'], fg=COLORS['accent'],
+                                    wraplength=500, justify=tk.LEFT)
+        self.status_label.pack(anchor=tk.W, pady=(4, 0))
+        
+        # Action buttons
+        btn_frame = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
+        btn_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        self.start_btn = ModernButton(btn_frame, text="▶ Start", 
+                                      command=self.start_link,
+                                      style='success', width=100)
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.stop_btn = ModernButton(btn_frame, text="■ Stop", 
+                                     command=self.stop_link,
+                                     style='secondary', width=100)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.delete_btn = ModernButton(btn_frame, text="🗑 Delete", 
+                                       command=self.delete_link,
+                                       style='danger', width=100)
+        self.delete_btn.pack(side=tk.LEFT)
+        
+        self.set_controls_state(False)
+    
+    def set_controls_state(self, enabled):
+        """Enable or disable right pane controls"""
+        self.name_entry.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        self.target_entry.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        self.browse_target_btn.set_enabled(enabled)
+        self.add_source_btn.set_enabled(enabled)
+        self.remove_source_btn.set_enabled(enabled)
+        self.start_btn.set_enabled(enabled)
+        self.stop_btn.set_enabled(enabled)
+        self.delete_btn.set_enabled(enabled)
+    
+    def refresh_links_list(self):
+        """Refresh the links listbox with colored status indicators"""
+        self.links_listbox.delete(0, tk.END)
+        idx = 0
+        for link_id, link in self.links.items():
+            # Use prefix to indicate status
+            if link.is_active:
+                prefix = "● "  # Filled circle
+            else:
+                prefix = "○ "  # Empty circle
+            self.links_listbox.insert(tk.END, f"{prefix}{link.name}")
+            
+            # Color the text based on status
+            if link.is_active:
+                self.links_listbox.itemconfig(idx, fg=COLORS['success'])
+            else:
+                self.links_listbox.itemconfig(idx, fg=COLORS['danger'])
+            idx += 1
+    
+    def refresh_sources_list(self):
+        """Refresh the sources listbox for current link"""
+        self.sources_listbox.delete(0, tk.END)
+        if self.selected_link_id and self.selected_link_id in self.links:
+            link = self.links[self.selected_link_id]
+            for source in link.sources.keys():
+                display = f"📁 {os.path.basename(source)}"
+                self.sources_listbox.insert(tk.END, display)
+    
+    def create_new_link(self):
+        """Create a new link configuration"""
+        link = LinkConfiguration(name=f"Link {len(self.links) + 1}")
+        self.links[link.id] = link
+        self.refresh_links_list()
+        
+        self.links_listbox.selection_clear(0, tk.END)
+        self.links_listbox.selection_set(tk.END)
+        self.select_link(link.id)
+        
+        self.save_settings()
+    
+    def on_link_selected(self, event):
+        """Handle link selection in listbox"""
+        selection = self.links_listbox.curselection()
+        if not selection:
+            return
+        
+        idx = selection[0]
+        link_ids = list(self.links.keys())
+        if idx < len(link_ids):
+            self.select_link(link_ids[idx])
+    
+    def select_link(self, link_id):
+        """Display the selected link in the right pane"""
+        if link_id not in self.links:
+            return
+        
+        self.selected_link_id = link_id
+        link = self.links[link_id]
+        
+        self.name_var.set(link.name)
+        self.target_var.set(link.target_path)
+        self.status_var.set(link.status)
+        self.refresh_sources_list()
+        
+        self.set_controls_state(True)
+    
+    def on_name_changed(self, *args):
+        """Handle name field changes"""
+        if self.selected_link_id and self.selected_link_id in self.links:
+            self.links[self.selected_link_id].name = self.name_var.get()
+            self.refresh_links_list()
+            
+            link_ids = list(self.links.keys())
+            if self.selected_link_id in link_ids:
+                idx = link_ids.index(self.selected_link_id)
+                self.links_listbox.selection_clear(0, tk.END)
+                self.links_listbox.selection_set(idx)
+            
+            self.save_settings()
+    
+    def browse_target(self):
+        """Browse for target directory"""
+        directory = filedialog.askdirectory(title="Select Target Directory")
+        if directory:
+            # Check if this target is already used by another link
+            normalized_dir = os.path.normcase(os.path.normpath(directory))
+            for link_id, link in self.links.items():
+                if link_id != self.selected_link_id:
+                    if link.target_path:
+                        existing_target = os.path.normcase(os.path.normpath(link.target_path))
+                        if normalized_dir == existing_target:
+                            messagebox.showwarning("Duplicate Target", 
+                                f"This target folder is already used by link '{link.name}'.\n\n"
+                                "Each link must have a unique target folder.")
+                            return
+            
+            self.target_var.set(directory)
+            if self.selected_link_id:
+                self.links[self.selected_link_id].target_path = directory
+                self.save_settings()
+    
+    def add_source(self):
+        """Add a new source directory to the current link"""
+        if not self.selected_link_id:
+            return
+        
+        link = self.links[self.selected_link_id]
+        
+        if not link.target_path:
+            messagebox.showwarning("Warning", "Please set the target directory first")
+            return
+        
+        directory = filedialog.askdirectory(title="Select Source Directory")
+        if not directory:
+            return
+        
+        if os.path.normcase(os.path.normpath(directory)) == os.path.normcase(os.path.normpath(link.target_path)):
+            messagebox.showwarning("Warning", "Source cannot be the same as the target!")
+            return
+        
+        # Check for duplicate source (case-insensitive)
+        normalized_dir = os.path.normcase(os.path.normpath(directory))
+        for existing_source in link.sources.keys():
+            if os.path.normcase(os.path.normpath(existing_source)) == normalized_dir:
+                messagebox.showwarning("Duplicate Source", 
+                    "This source folder is already added to this link.")
+                return
+        
+        link.sources[directory] = None
+        self.refresh_sources_list()
+        self.save_settings()
+        
+        if link.is_active:
+            observer = create_symlinks_for_source(directory, link.target_path, self.update_status)
+            if observer:
+                link.sources[directory] = observer
+    
+    def remove_source(self):
+        """Remove selected source from current link"""
+        if not self.selected_link_id:
+            return
+        
+        selection = self.sources_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Info", "Please select a source to remove")
+            return
+        
+        link = self.links[self.selected_link_id]
+        source_list = list(link.sources.keys())
+        source = source_list[selection[0]]
+        
+        if link.sources.get(source):
+            link.sources[source].stop()
+            link.sources[source].join()
+        
+        if messagebox.askyesno("Cleanup", f"Remove symlinks created from this source?"):
+            self.cleanup_source_symlinks(source, link.target_path)
+        
+        del link.sources[source]
+        self.refresh_sources_list()
+        self.save_settings()
+    
+    def cleanup_source_symlinks(self, source, target):
+        """Remove symlinks from target that point to source"""
+        try:
+            for item in os.listdir(target):
+                full_path = os.path.join(target, item)
+                if os.path.islink(full_path):
+                    try:
+                        link_target = os.readlink(full_path)
+                        if os.path.normcase(os.path.normpath(link_target)).startswith(
+                            os.path.normcase(os.path.normpath(source))):
+                            if os.path.isdir(full_path):
+                                cmd = f'rmdir "{full_path}"'
+                            else:
+                                cmd = f'del /f "{full_path}"'
+                            execute_admin_command(cmd)
+                    except:
+                        pass
+        except:
+            pass
+    
+    def update_status(self, message):
+        """Update status for the selected link"""
+        self.status_var.set(message)
+        if self.selected_link_id and self.selected_link_id in self.links:
+            self.links[self.selected_link_id].status = message
+    
+    def start_link(self):
+        """Start watching all sources for the selected link"""
+        if not self.selected_link_id:
+            return
+        
+        link = self.links[self.selected_link_id]
+        link.target_path = self.target_var.get()
+        
+        if not link.target_path:
+            messagebox.showwarning("Warning", "Please set the target directory")
+            return
+        
+        if not link.sources:
+            messagebox.showwarning("Warning", "Please add at least one source directory")
+            return
+        
+        if link.is_active:
+            messagebox.showinfo("Info", "This link is already active")
+            return
+        
+        self.update_status("⏳ Starting...")
+        
+        for source in list(link.sources.keys()):
+            observer = create_symlinks_for_source(source, link.target_path, self.update_status)
+            if observer:
+                link.sources[source] = observer
+        
+        link.is_active = True
+        link.status = f"✅ Watching {len(link.sources)} source(s)"
+        self.status_var.set(link.status)
+        self.refresh_links_list()
+        self.save_settings()
+    
+    def stop_link(self):
+        """Stop watching for the selected link"""
+        if not self.selected_link_id:
+            return
+        
+        link = self.links[self.selected_link_id]
+        
+        if not link.is_active:
+            messagebox.showinfo("Info", "This link is not active")
+            return
+        
+        for source, observer in link.sources.items():
+            if observer:
+                observer.stop()
+                observer.join()
+            link.sources[source] = None
+        
+        link.is_active = False
+        link.status = "⏹️ Stopped"
+        self.update_status(link.status)
+        self.refresh_links_list()
+        self.save_settings()
+    
+    def delete_link(self):
+        """Delete the selected link"""
+        if not self.selected_link_id:
+            return
+        
+        if not messagebox.askyesno("Delete Link", "Are you sure you want to delete this link?"):
+            return
+        
+        link = self.links[self.selected_link_id]
+        
+        for source, observer in link.sources.items():
+            if observer:
+                observer.stop()
+                observer.join()
+        
+        if link.target_path and os.path.exists(link.target_path):
+            if messagebox.askyesno("Cleanup", "Remove all symlinks created in the target?"):
+                for source in link.sources.keys():
+                    self.cleanup_source_symlinks(source, link.target_path)
+        
+        del self.links[self.selected_link_id]
+        self.selected_link_id = None
+        
+        self.refresh_links_list()
+        self.sources_listbox.delete(0, tk.END)
+        self.set_controls_state(False)
+        self.name_var.set("")
+        self.target_var.set("")
+        self.status_var.set("✨ Select or create a link to begin")
+        
+        self.save_settings()
+    
+    def save_settings(self):
+        """Save all link configurations to temp file"""
+        try:
+            data = {"links": [link.to_dict() for link in self.links.values()]}
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving: {e}")
+    
+    def load_settings(self):
+        """Load link configurations from temp file"""
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    data = json.load(f)
+                
+                for link_data in data.get("links", []):
+                    link = LinkConfiguration.from_dict(link_data)
+                    self.links[link.id] = link
+                    
+                    if link.is_active and link.target_path and link.sources:
+                        link.is_active = False
+                        for source in list(link.sources.keys()):
+                            observer = create_symlinks_for_source(
+                                source, link.target_path,
+                                lambda msg, l=link: setattr(l, 'status', msg)
+                            )
+                            if observer:
+                                link.sources[source] = observer
+                        link.is_active = True
+                        link.status = f"🟢 Watching {len(link.sources)} source(s)"
+                
+                self.refresh_links_list()
+        except Exception as e:
+            print(f"Error loading: {e}")
+    
+    def minimize_to_tray(self, event=None):
+        """Minimize to system tray"""
+        if self.root.state() == 'iconic':
+            self.root.withdraw()
+            threading.Thread(target=self.start_tray_icon, daemon=True).start()
+    
+    def start_tray_icon(self):
+        """Create and run the tray icon"""
+        image = self.create_tray_image()
+        self.tray_icon = pystray.Icon("SymSync", image, "SymSync", menu=pystray.Menu(
+            pystray.MenuItem("Restore", self.restore_window),
+            pystray.MenuItem("Quit", self.quit_app)
+        ))
+        self.tray_icon.run()
+    
+    def restore_window(self, icon, item):
+        """Restore from tray"""
+        self.root.deiconify()
+        self.root.state('normal')
+        icon.stop()
+    
+    def quit_app(self, icon, item):
+        """Quit application"""
+        icon.stop()
+        self.cleanup_and_exit()
+    
+    def cleanup_and_exit(self):
+        """Clean up and exit"""
+        for link in self.links.values():
+            for observer in link.sources.values():
+                if observer:
+                    observer.stop()
+                    observer.join()
+        self.single_instance.release()
+        self.root.destroy()
+    
+    def on_closing(self):
+        """Handle window close"""
+        if messagebox.askokcancel("Quit", "Do you really want to quit?"):
+            self.cleanup_and_exit()
+        else:
+            self.root.iconify()
 
-def on_closing():
-    """Override close event: ask for confirmation and, if not quitting, minimize to tray."""
-    if messagebox.askokcancel("Quit", "Do you really want to quit?"):
-        root.destroy()
-    else:
-        root.iconify()
 
 if __name__ == "__main__":
+    # Check for single instance
+    single_instance = SingleInstance()
+    if not single_instance.try_lock():
+        messagebox.showwarning("Already Running", 
+                              "SymSync is already running.\n\n"
+                              "Check the system tray for the running instance.")
+        sys.exit(0)
+    
     # Check for admin privileges
     if not is_admin():
-        messagebox.showerror("Error", "This script needs to be run as administrator")
-    else:
-        # Create main window
-        root = tk.Tk()
-        root.title("Folder Linker")
-        root.geometry("600x400")  # Increased height for the new layout
-
-        # Set the application icon to be the same as the tray icon 💡
-        tray_img_pil = create_tray_image()
-        tray_img_tk = ImageTk.PhotoImage(tray_img_pil)
-        root.iconphoto(True, tray_img_tk)
-        root._icon = tray_img_tk  # Store a reference to prevent GC
-
-        # Configure GUI styles
-        style = ttk.Style()
-        style.configure("Custom.TFrame", background="#f0f0ff")
-        style.configure("Custom.TButton", padding=5, font=('Helvetica', 9, 'bold'))
-        style.configure("Custom.TLabel", font=('Helvetica', 9))
-        
-        # Create main frame
-        main_frame = ttk.Frame(root, padding="10", style="Custom.TFrame")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Target directory selection (Row 0)
-        target_var = tk.StringVar()
-        ttk.Label(main_frame, text="Target:", style="Custom.TLabel").grid(row=0, column=0, sticky=tk.W, pady=2)
-        target_entry = ttk.Entry(main_frame, textvariable=target_var, width=50)
-        target_entry.grid(row=0, column=1, padx=2)
-        ttk.Button(main_frame, text="Browse", style="Custom.TButton",
-                  command=change_target
-                  ).grid(row=0, column=2)
-        
-        # Watched Sources frame (Row 1)
-        sources_frame = ttk.LabelFrame(main_frame, text="Watched Sources", style="Custom.TFrame", padding="5")
-        sources_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        
-        # + Add Source button (Row 2)
-        add_source_btn = ttk.Button(main_frame, text="+ Add Source", style="Custom.TButton", command=add_source)
-        add_source_btn.grid(row=2, column=0, columnspan=3, pady=5)
-        
-        # Status display (Row 3)
-        status_var = tk.StringVar(value="Ready to add sources")
-        status_label = ttk.Label(main_frame, textvariable=status_var, wraplength=580, style="Custom.TLabel")
-        status_label.grid(row=3, column=0, columnspan=3, pady=10)
-        
-        # Configure grid weights for proper resizing
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        
-        # Bind the minimize event to minimize_to_tray and override the close event
-        root.bind("<Unmap>", minimize_to_tray)
-        root.protocol("WM_DELETE_WINDOW", on_closing)
-        
-        # Start the application
-        root.mainloop()
+        single_instance.release()
+        messagebox.showerror("Administrator Required", 
+                            "SymSync needs administrator privileges to create symbolic links.\n\n"
+                            "Please run as administrator.")
+        sys.exit(1)
+    
+    # Run the application
+    root = tk.Tk()
+    app = SymSyncApp(root, single_instance)
+    root.mainloop()

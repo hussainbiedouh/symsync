@@ -1,25 +1,58 @@
-# 📁 SymSync
+# 📁 SymSync v3
 
 A Windows utility that creates and maintains symbolic links between multiple source directories and a target directory, with real-time synchronization and system tray support! 🔄
 
 ## ✨ Features
 
+### Core Features
 - 🔗 Creates symbolic links from multiple source directories to a target directory
 - 👀 Monitors source directories for changes in real-time with recursive subdirectory watching
 - 🔄 Automatically updates links when files are created, modified, moved or deleted
-- 🎨 Clean and intuitive GUI interface with light blue theme
 - 🛡️ Runs with administrative privileges for proper link management
-- 📊 Shows detailed status updates for each operation
-- 🎯 Easily add and remove watched source directories
-- 🔄 Seamlessly change target directory with option to clean up old links
+
+### v3 New Features
+- 📋 **Multi-Link Support** - Create multiple independent link configurations in a single instance
+- 💾 **Persistent Settings** - Automatically saves/restores settings to `%TEMP%\symsync_settings.json`
+- 🔒 **Single Instance** - Prevents multiple instances from running simultaneously
+- 🎨 **Modern Light Theme UI** - Clean white/blue design with custom styled buttons
+- 🟢🔴 **Visual Status Indicators** - Color-coded link status (green=active, red=inactive)
+- ✅ **Duplicate Prevention** - Prevents duplicate target folders across links and duplicate sources within a link
+- 📊 **Enhanced Status Display** - Colorful status messages with emojis
 
 ## 🚀 Getting Started
 
-1. Run the application as Administrator (required for creating symbolic links)
-2. Select your target directory using the Browse button 🔍
-3. Click "+ Add Source" to select source directories to watch
-4. The application will create links and continue monitoring for changes
-5. Use the "-" button next to each source to stop watching and remove its links
+1. Run `SymSync_v3.exe` as Administrator (required for creating symbolic links)
+2. Click **"+ New Link"** to create a new link configuration
+3. Give your link a name (e.g., "Game Mods")
+4. Select a **Target Directory** using the Browse button
+5. Click **"+ Add"** to add one or more source directories
+6. Click **"▶ Start"** to create symlinks and begin monitoring
+7. Repeat for additional link configurations as needed
+
+## 🖥️ User Interface
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         SymSync                                 │
+├───────────────────┬─────────────────────────────────────────────┤
+│   LINKS           │           LINK DETAILS                      │
+├───────────────────┼─────────────────────────────────────────────┤
+│                   │                                             │
+│  [+ New Link]     │  Name: [________________]                   │
+│                   │                                             │
+│  ● Link 1 (green) │  Target: [_______________] [Browse]         │
+│  ○ Link 2 (red)   │                                             │
+│                   │  Sources: [+ Add] [- Remove]                │
+│                   │  ┌─────────────────────────┐                │
+│                   │  │ 📁 folder1              │                │
+│                   │  │ 📁 folder2              │                │
+│                   │  └─────────────────────────┘                │
+│                   │                                             │
+│                   │  STATUS: ✅ Watching 2 source(s)            │
+│                   │                                             │
+│                   │  [▶ Start]  [■ Stop]  [🗑 Delete]           │
+└───────────────────┴─────────────────────────────────────────────┘
+```
 
 ## 💡 Use Cases
 
@@ -27,29 +60,50 @@ A Windows utility that creates and maintains symbolic links between multiple sou
 - 📂 Create synchronized backup structures
 - 🔄 Maintain mirror directories without duplicating files
 - 📱 Share files between different applications
+- 💿 Combine content from multiple drives into a single view
 
 ## ⚙️ Requirements
 
 - Windows operating system
 - Administrative privileges
-- Python 3.x
-- Required packages: 
-  - watchdog>=3.0.0 (file system monitoring)
-  - Pillow>=10.0.0 (image handling)
-  - pystray>=0.19.0 (system tray support)
-  - tkinter>=8.6 (GUI framework)
+- Python 3.x (for running from source)
+
+### Python Packages (for development)
+```
+watchdog>=3.0.0
+Pillow>=10.0.0
+pystray>=0.19.0
+```
 
 ## 🛠️ Installation
 
+### Option 1: Run the Executable
+Simply download and run `SymSync_v3.exe` as Administrator.
+
+### Option 2: Run from Source
 1. Clone this repository
 2. Install required packages:
    ```bash
    pip install -r requirements.txt
    ```
-3. Run the script:
+3. Run the script as Administrator:
    ```bash
-   python symsync.py
+   python SymSync.py
    ```
+
+### Build from Source
+```bash
+py -m PyInstaller --clean symsync.spec
+```
+
+## 📁 Settings Storage
+
+Settings are automatically saved to:
+```
+%TEMP%\symsync_settings.json
+```
+
+This includes all link configurations, sources, targets, and active states. Links that were active when the app closed will automatically restart when you reopen the app.
 
 ## 🤝 Contributing
 
@@ -68,11 +122,30 @@ This project is licensed under the GNU General Public License v3.0 (GPL-3.0) - s
 ## ⚠️ Important Notes
 
 - The application requires administrative privileges to create symbolic links
+- Only one instance of SymSync can run at a time (check system tray if already running)
 - Target directory must be selected before adding source directories
+- Each link must have a unique target directory
 - The application watches subdirectories recursively for changes
 - Closing the main window minimizes to system tray with a stylish "SS" gradient icon
 - System tray menu provides options to Restore window or Quit
-- Status updates are shown in real-time for all link operations
-- Window size is 600x400 pixels with resizable frame
-- Sources can be added and removed dynamically
-- Target directory can be changed with option to clean up old links
+- Status updates are shown in real-time with colorful indicators
+- Window size is 1050x720 pixels with resizable frame (minimum 900x600)
+
+## 📜 Version History
+
+### v3.0 (2026-01-05)
+- Multi-link support with dual-pane UI
+- Persistent settings with auto-restore
+- Single instance enforcement
+- Modern light theme with colored status indicators
+- Duplicate target/source prevention
+- Enhanced status display with emojis
+
+### v2.0
+- Multiple source directories per target
+- System tray integration
+- Real-time file monitoring
+
+### v1.0
+- Initial release
+- Basic symlink creation
