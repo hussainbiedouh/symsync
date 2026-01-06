@@ -14,6 +14,8 @@ import json  # For settings persistence
 import tempfile  # For system temp folder
 import uuid  # For unique link IDs
 import msvcrt  # For file locking (Windows)
+from datetime import datetime  # For timestamps
+import time  # For periodic intervals
 
 # Settings and lock file paths
 SETTINGS_FILE = os.path.join(tempfile.gettempdir(), "symsync_settings.json")
@@ -101,6 +103,10 @@ class LinkConfiguration:
         self.sources = {}  # source_path -> observer
         self.is_active = False
         self.status = "Not configured"
+        self.logs = []  # List of status history
+        self.rescan_interval = 10  # Default 10 seconds
+        self.last_rescan = 0  # Timestamp of last rescan
+
     
     def to_dict(self):
         """Serialize to dictionary for JSON storage"""
@@ -109,7 +115,9 @@ class LinkConfiguration:
             "name": self.name,
             "target_path": self.target_path,
             "sources": list(self.sources.keys()),
-            "is_active": self.is_active
+            "is_active": self.is_active,
+            "logs": self.logs[-50:],  # Keep last 50 logs only
+            "rescan_interval": self.rescan_interval
         }
     
     @classmethod
@@ -123,6 +131,8 @@ class LinkConfiguration:
         for source in data.get("sources", []):
             link.sources[source] = None
         link.is_active = data.get("is_active", False)
+        link.logs = data.get("logs", [])
+        link.rescan_interval = data.get("rescan_interval", 10)
         return link
 
 
@@ -275,25 +285,10 @@ def create_symlinks_for_source(source, target, update_status):
     if not os.path.exists(target):
         os.makedirs(target)
     
-    success_count = 0
-    for item in os.listdir(source):
-        source_path = os.path.normpath(os.path.join(source, item))
-        target_path = os.path.normpath(os.path.join(target, item))
-
-        if os.path.lexists(target_path):
-            if os.path.isdir(source_path) and os.path.isdir(target_path):
-                success_count += merge_directory_contents(source_path, target_path, update_status)
-                continue
-            else:
-                continue
-
-        if os.path.isdir(source_path):
-            cmd = f'mklink /D "{target_path}" "{source_path}"'
-        else:
-            cmd = f'mklink "{target_path}" "{source_path}"'
-        
-        if execute_admin_command(cmd):
-            success_count += 1
+    # Use the merge logic which effectively creates the symlinks
+    # Pass a dummy callback if you don't want verbose spam during this phase, 
+    # or pass update_status to let merge recursive calls update status.
+    success_count = merge_directory_contents(source, target, update_status)
     
     update_status(f"🔗 Linked {success_count} items from {os.path.basename(source)}")
 
@@ -431,6 +426,45 @@ class ModernEntry(tk.Frame):
             self.entry.config(state=kwargs['state'])
 
 
+class RoundedFrame(tk.Canvas):
+    """A Frame-like container with rounded corners"""
+    def __init__(self, parent, bg_color=COLORS['card_bg'], radius=15, padding=10, **kwargs):
+        super().__init__(parent, highlightthickness=0, bg=parent['bg'], **kwargs)
+        
+        self.radius = radius
+        self.bg_color = bg_color
+        self.padding = padding
+        
+        self.inner_frame = tk.Frame(self, bg=bg_color)
+        self.window_item = self.create_window(0, 0, window=self.inner_frame, anchor='nw')
+        
+        self.bind('<Configure>', self.on_configure)
+    
+    def on_configure(self, event):
+        w, h = event.width, event.height
+        self.delete('bg')
+        
+        # Draw rounded rect background
+        self.create_rounded_rect(0, 0, w, h, self.radius, fill=self.bg_color, outline=COLORS['border'], tags='bg')
+        self.tag_lower('bg')
+        
+        # Resize inner frame to fit inside with padding
+        # Ensure we don't go negative
+        inner_w = max(1, w - (self.padding * 2))
+        inner_h = max(1, h - (self.padding * 2))
+        
+        self.coords(self.window_item, self.padding, self.padding)
+        self.itemconfigure(self.window_item, width=inner_w, height=inner_h)
+    
+    def create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        points = [
+            x1+radius, y1, x2-radius, y1, x2, y1, x2, y1+radius,
+            x2, y2-radius, x2, y2, x2-radius, y2, x1+radius, y2,
+            x1, y2, x1, y2-radius, x1, y1+radius, x1, y1,
+        ]
+        return self.create_polygon(points, smooth=True, **kwargs)
+
+
 class SymSyncApp:
     """Main application class with modern light theme UI"""
     
@@ -444,10 +478,14 @@ class SymSyncApp:
         
         self.links = {}
         self.selected_link_id = None
+        self.stop_event = threading.Event()
         
         self.setup_icon()
         self.create_ui()
         self.load_settings()
+        
+        # Start background rescan thread
+        threading.Thread(target=self.rescan_active_links, daemon=True).start()
         
         self.root.bind("<Unmap>", self.minimize_to_tray)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -519,12 +557,28 @@ class SymSyncApp:
         title_frame = tk.Frame(header, bg=COLORS['bg_secondary'])
         title_frame.pack(side=tk.LEFT)
         
-        # Icon circle
+        # Icon rect
         icon_canvas = tk.Canvas(title_frame, width=40, height=40, 
                                bg=COLORS['bg_secondary'], highlightthickness=0)
         icon_canvas.pack(side=tk.LEFT, padx=(0, 10))
-        icon_canvas.create_oval(2, 2, 38, 38, fill=COLORS['accent'], outline='')
-        icon_canvas.create_text(20, 20, text="🔗", font=('Segoe UI Emoji', 14), fill='white')
+        
+        # Draw purple rounded rect
+        purple_color = "#6b2c91" # Deep purple
+        
+        # Draw rounded rect manually or using polygon
+        def create_rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+            points = [
+                x1+radius, y1, x2-radius, y1, x2, y1, x2, y1+radius,
+                x2, y2-radius, x2, y2, x2-radius, y2, x1+radius, y2,
+                x1, y2, x1, y2-radius, x1, y1+radius, x1, y1,
+            ]
+            return canvas.create_polygon(points, smooth=True, **kwargs)
+
+        create_rounded_rect(icon_canvas, 2, 2, 38, 38, 8, fill=purple_color, outline='')
+        
+        # "SS" text in bottom right
+        icon_canvas.create_text(34, 34, text="SS", font=('Segoe UI', 11, 'bold'), 
+                               fill='white', anchor='se')
         
         title = tk.Label(title_frame, text="SymSync", font=('Segoe UI', 20, 'bold'),
                         bg=COLORS['bg_secondary'], fg=COLORS['text_primary'])
@@ -537,16 +591,14 @@ class SymSyncApp:
     
     def create_left_pane(self, parent):
         """Create the left pane with links list"""
-        # Card container
-        left_card = tk.Frame(parent, bg=COLORS['card_bg'], width=250)
+        # Card container (RoundedFrame)
+        left_card = RoundedFrame(parent, bg_color=COLORS['card_bg'], width=250)
         left_card.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 15))
         left_card.pack_propagate(False)
         
-        # Add subtle border
-        left_card.config(highlightbackground=COLORS['border'], highlightthickness=1)
-        
-        inner = tk.Frame(left_card, bg=COLORS['card_bg'])
-        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        inner = left_card.inner_frame
+        # Reuse inner frame for content, no need to pack it again as RoundedFrame handles it
+        # Just ensure we add widgets to 'inner'
         
         header = tk.Label(inner, text="LINKS", font=('Segoe UI', 9, 'bold'),
                          bg=COLORS['card_bg'], fg=COLORS['text_muted'])
@@ -583,43 +635,42 @@ class SymSyncApp:
     
     def create_right_pane(self, parent):
         """Create the right pane with link details"""
-        # Card container
-        right_card = tk.Frame(parent, bg=COLORS['card_bg'])
+        # Card container (RoundedFrame)
+        right_card = RoundedFrame(parent, bg_color=COLORS['card_bg'])
         right_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        right_card.config(highlightbackground=COLORS['border'], highlightthickness=1)
         
-        self.detail_inner = tk.Frame(right_card, bg=COLORS['card_bg'])
-        self.detail_inner.pack(fill=tk.BOTH, expand=True, padx=25, pady=20)
+        self.detail_inner = right_card.inner_frame
+         # Reuse inner frame for content
         
         header = tk.Label(self.detail_inner, text="LINK DETAILS", 
                          font=('Segoe UI', 9, 'bold'),
                          bg=COLORS['card_bg'], fg=COLORS['text_muted'])
-        header.pack(anchor=tk.W, pady=(0, 20))
+        header.pack(anchor=tk.W, pady=(0, 15))
         
         form = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
         form.pack(fill=tk.X)
         
         # Name field
         name_row = tk.Frame(form, bg=COLORS['card_bg'])
-        name_row.pack(fill=tk.X, pady=(0, 15))
+        name_row.pack(fill=tk.X, pady=(0, 10))
         
         tk.Label(name_row, text="Name", font=('Segoe UI', 10, 'bold'),
                 bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor=tk.W)
         
         self.name_var = tk.StringVar()
         self.name_entry = ModernEntry(name_row, textvariable=self.name_var, width=50)
-        self.name_entry.pack(fill=tk.X, pady=(6, 0))
+        self.name_entry.pack(fill=tk.X, pady=(4, 0))
         self.name_var.trace_add("write", self.on_name_changed)
         
         # Target field
         target_row = tk.Frame(form, bg=COLORS['card_bg'])
-        target_row.pack(fill=tk.X, pady=(0, 15))
+        target_row.pack(fill=tk.X, pady=(0, 10))
         
         tk.Label(target_row, text="Target Directory", font=('Segoe UI', 10, 'bold'),
                 bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor=tk.W)
         
         target_input_row = tk.Frame(target_row, bg=COLORS['card_bg'])
-        target_input_row.pack(fill=tk.X, pady=(6, 0))
+        target_input_row.pack(fill=tk.X, pady=(4, 0))
         
         self.target_var = tk.StringVar()
         self.target_entry = ModernEntry(target_input_row, textvariable=self.target_var, width=45)
@@ -656,7 +707,7 @@ class SymSyncApp:
         # Sources list
         sources_list_frame = tk.Frame(sources_frame, bg=COLORS['bg_secondary'],
                                      highlightbackground=COLORS['border'], highlightthickness=1)
-        sources_list_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        sources_list_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         
         sources_scrollbar = tk.Scrollbar(sources_list_frame)
         sources_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -671,17 +722,17 @@ class SymSyncApp:
                                           activestyle='none',
                                           relief='flat',
                                           highlightthickness=0,
-                                          height=5)
+                                          height=4)
         self.sources_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         sources_scrollbar.config(command=self.sources_listbox.yview)
         
         # Status section
         status_frame = tk.Frame(self.detail_inner, bg=COLORS['bg_secondary'],
                                highlightbackground=COLORS['border'], highlightthickness=1)
-        status_frame.pack(fill=tk.X, pady=(20, 0))
+        status_frame.pack(fill=tk.X, pady=(15, 0))
         
         status_inner = tk.Frame(status_frame, bg=COLORS['bg_secondary'])
-        status_inner.pack(fill=tk.X, padx=15, pady=12)
+        status_inner.pack(fill=tk.X, padx=15, pady=10)
         
         tk.Label(status_inner, text="STATUS", font=('Segoe UI', 8, 'bold'),
                 bg=COLORS['bg_secondary'], fg=COLORS['text_muted']).pack(anchor=tk.W)
@@ -692,6 +743,31 @@ class SymSyncApp:
                                     bg=COLORS['bg_secondary'], fg=COLORS['accent'],
                                     wraplength=500, justify=tk.LEFT)
         self.status_label.pack(anchor=tk.W, pady=(4, 0))
+        
+        # Rescan Interval
+        rescan_frame = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
+        rescan_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        tk.Label(rescan_frame, text="Rescan Interval:", font=('Segoe UI', 9, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side=tk.LEFT)
+        
+        self.rescan_options = {
+            "1 sec": 1,
+            "10 sec": 10,
+            "30 sec": 30,
+            "1 min": 60,
+            "5 min": 300,
+            "10 min": 600,
+            "30 min": 1800,
+            "1 h": 3600
+        }
+        
+        self.rescan_var = tk.StringVar()
+        self.rescan_combo = ttk.Combobox(rescan_frame, textvariable=self.rescan_var, 
+                                        values=list(self.rescan_options.keys()),
+                                        state="readonly", width=15)
+        self.rescan_combo.pack(side=tk.LEFT, padx=(10, 0))
+        self.rescan_combo.bind("<<ComboboxSelected>>", self.on_rescan_changed)
         
         # Action buttons
         btn_frame = tk.Frame(self.detail_inner, bg=COLORS['card_bg'])
@@ -711,8 +787,35 @@ class SymSyncApp:
                                        command=self.delete_link,
                                        style='danger', width=100)
         self.delete_btn.pack(side=tk.LEFT)
+
+        # Log Section
+        log_label = tk.Label(self.detail_inner, text="ACTIVITY LOG", 
+                         font=('Segoe UI', 9, 'bold'),
+                         bg=COLORS['card_bg'], fg=COLORS['text_muted'])
+        log_label.pack(anchor=tk.W, pady=(15, 5))
+
+        log_frame = tk.Frame(self.detail_inner, bg=COLORS['bg_primary'],
+                             highlightbackground=COLORS['border'], highlightthickness=1)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        log_scrollbar = tk.Scrollbar(log_frame)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.log_listbox = tk.Listbox(log_frame,
+                                      yscrollcommand=log_scrollbar.set,
+                                      font=('Consolas', 9),
+                                      bg=COLORS['bg_primary'],
+                                      fg=COLORS['text_secondary'],
+                                      selectbackground=COLORS['bg_primary'], # No selection highlight
+                                      selectforeground=COLORS['text_secondary'],
+                                      relief='flat',
+                                      highlightthickness=0,
+                                      height=6)
+        self.log_listbox.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        log_scrollbar.config(command=self.log_listbox.yview)
         
         self.set_controls_state(False)
+
     
     def set_controls_state(self, enabled):
         """Enable or disable right pane controls"""
@@ -724,6 +827,7 @@ class SymSyncApp:
         self.start_btn.set_enabled(enabled)
         self.stop_btn.set_enabled(enabled)
         self.delete_btn.set_enabled(enabled)
+        self.rescan_combo.config(state="readonly" if enabled else "disabled")
     
     def refresh_links_list(self):
         """Refresh the links listbox with colored status indicators"""
@@ -787,7 +891,20 @@ class SymSyncApp:
         self.name_var.set(link.name)
         self.target_var.set(link.target_path)
         self.status_var.set(link.status)
+        
+        # Set rescan combo
+        for text, val in self.rescan_options.items():
+            if val == link.rescan_interval:
+                self.rescan_var.set(text)
+                break
+        
         self.refresh_sources_list()
+        
+        self.log_listbox.delete(0, tk.END)
+        for log in link.logs:
+            self.log_listbox.insert(tk.END, log)
+        self.log_listbox.yview(tk.END)
+
         
         self.set_controls_state(True)
     
@@ -907,11 +1024,27 @@ class SymSyncApp:
         except:
             pass
     
-    def update_status(self, message):
-        """Update status for the selected link"""
-        self.status_var.set(message)
-        if self.selected_link_id and self.selected_link_id in self.links:
-            self.links[self.selected_link_id].status = message
+    def update_link_status(self, link_id, message):
+        """Update status and logs for a specific link"""
+        if link_id not in self.links:
+            return
+            
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        
+        link = self.links[link_id]
+        link.status = message
+        link.logs.append(log_entry)
+        
+        # Limit logs to 50 entries
+        if len(link.logs) > 50:
+            link.logs.pop(0)
+            
+        # Update UI if this is the selected link
+        if self.selected_link_id == link_id:
+            self.status_var.set(message)
+            self.log_listbox.insert(tk.END, log_entry)
+            self.log_listbox.yview(tk.END)
     
     def start_link(self):
         """Start watching all sources for the selected link"""
@@ -933,16 +1066,18 @@ class SymSyncApp:
             messagebox.showinfo("Info", "This link is already active")
             return
         
-        self.update_status("⏳ Starting...")
+        self.update_link_status(link.id, "⏳ Starting...")
+        
+        update_callback = lambda msg: self.update_link_status(link.id, msg)
         
         for source in list(link.sources.keys()):
-            observer = create_symlinks_for_source(source, link.target_path, self.update_status)
+            observer = create_symlinks_for_source(source, link.target_path, update_callback)
             if observer:
                 link.sources[source] = observer
         
         link.is_active = True
-        link.status = f"✅ Watching {len(link.sources)} source(s)"
-        self.status_var.set(link.status)
+        self.update_link_status(link.id, f"✅ Watching {len(link.sources)} source(s)")
+        self.refresh_links_list()
         self.refresh_links_list()
         self.save_settings()
     
@@ -964,8 +1099,7 @@ class SymSyncApp:
             link.sources[source] = None
         
         link.is_active = False
-        link.status = "⏹️ Stopped"
-        self.update_status(link.status)
+        self.update_link_status(link.id, "⏹️ Stopped")
         self.refresh_links_list()
         self.save_settings()
     
@@ -993,7 +1127,9 @@ class SymSyncApp:
         self.selected_link_id = None
         
         self.refresh_links_list()
+        self.refresh_links_list()
         self.sources_listbox.delete(0, tk.END)
+        self.log_listbox.delete(0, tk.END)
         self.set_controls_state(False)
         self.name_var.set("")
         self.target_var.set("")
@@ -1026,17 +1162,67 @@ class SymSyncApp:
                         for source in list(link.sources.keys()):
                             observer = create_symlinks_for_source(
                                 source, link.target_path,
-                                lambda msg, l=link: setattr(l, 'status', msg)
+                                lambda msg, l=link: self.update_link_status(l.id, msg)
                             )
                             if observer:
                                 link.sources[source] = observer
                         link.is_active = True
-                        link.status = f"🟢 Watching {len(link.sources)} source(s)"
+                        # Don't overwrite status here as it's set by callback or loaded
                 
                 self.refresh_links_list()
         except Exception as e:
             print(f"Error loading: {e}")
     
+    def on_rescan_changed(self, event):
+        """Handle rescan interval change"""
+        if self.selected_link_id and self.selected_link_id in self.links:
+            text = self.rescan_var.get()
+            interval = self.rescan_options.get(text, 10)
+            self.links[self.selected_link_id].rescan_interval = interval
+            self.save_settings()
+
+    def rescan_active_links(self):
+        """Periodically rescan active links to restore deleted items"""
+        while not self.stop_event.is_set():
+            current_time = time.time()
+            
+            # Helper to check stop event while sleeping
+            for _ in range(10): 
+                if self.stop_event.is_set(): return
+                time.sleep(0.1)
+
+            try:
+                # Use list() to avoid runtime error if dict changes size
+                for link in list(self.links.values()):
+                    if not link.is_active:
+                        continue
+                        
+                    # Check if it's time to rescan this link
+                    if current_time - link.last_rescan < link.rescan_interval:
+                        continue
+                        
+                    link.last_rescan = current_time
+                    
+                    for source in list(link.sources.keys()):
+                        try:
+                            # We check safely in case user stopped/deleted link mid-loop
+                            if not self.links.get(link.id): break
+                            
+                            count = merge_directory_contents(
+                                source, 
+                                link.target_path, 
+                                lambda msg: self.update_link_status(link.id, msg)
+                            )
+                            
+                            if count > 0:
+                                self.update_link_status(link.id, f"♻️ Rescan restored {count} item(s)")
+                                
+                        except Exception as e:
+                            print(f"Rescan error for {link.name}: {e}")
+                            
+            except Exception as e:
+                print(f"Rescan loop error: {e}")
+
     def minimize_to_tray(self, event=None):
         """Minimize to system tray"""
         if self.root.state() == 'iconic':
@@ -1065,6 +1251,7 @@ class SymSyncApp:
     
     def cleanup_and_exit(self):
         """Clean up and exit"""
+        self.stop_event.set()
         for link in self.links.values():
             for observer in link.sources.values():
                 if observer:
@@ -1081,22 +1268,60 @@ class SymSyncApp:
             self.root.iconify()
 
 
+def elevate():
+    """Relaunch the script with administrative privileges"""
+    try:
+        if getattr(sys, 'frozen', False):
+            # If running as compiled exe
+            executable = sys.executable
+            params = ' '.join(['"' + arg + '"' for arg in sys.argv[1:]])
+            cmd = f'{params}'
+        else:
+            # If running as script
+            executable = sys.executable
+            script = os.path.abspath(sys.argv[0])
+            params = ' '.join(['"' + arg + '"' for arg in sys.argv[1:]])
+            cmd = f'"{script}" {params}'
+        
+        # Execute the script as admin
+        # 0: hwnd (null)
+        # "runas": verb for elevation
+        # executable: path to interpreter or exe
+        # cmd: parameters
+        # None: directory (current)
+        # 1: nShow (SW_SHOWNORMAL)
+        ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, cmd, None, 1)
+        
+        if int(ret) > 32:
+            return True
+        else:
+            return False
+    except Exception as e:
+        print(f"Elevation failed: {e}")
+        return False
+
+
 if __name__ == "__main__":
+    # Check for admin privileges first
+    if not is_admin():
+        if elevate():
+            sys.exit(0)
+        else:
+            messagebox.showerror("Administrator Required", 
+                                "SymSync needs administrator privileges to create symbolic links.\n\n"
+                                "Failed to elevate. Please run manualy as administrator.")
+            sys.exit(1)
+
     # Check for single instance
     single_instance = SingleInstance()
     if not single_instance.try_lock():
+        root = tk.Tk()
+        root.withdraw() # Hide root window for simple message
         messagebox.showwarning("Already Running", 
                               "SymSync is already running.\n\n"
                               "Check the system tray for the running instance.")
+        root.destroy()
         sys.exit(0)
-    
-    # Check for admin privileges
-    if not is_admin():
-        single_instance.release()
-        messagebox.showerror("Administrator Required", 
-                            "SymSync needs administrator privileges to create symbolic links.\n\n"
-                            "Please run as administrator.")
-        sys.exit(1)
     
     # Run the application
     root = tk.Tk()
