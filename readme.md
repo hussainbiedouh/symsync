@@ -11,6 +11,15 @@ A Windows utility that creates and maintains symbolic links between multiple sou
 - 🛡️ Runs with administrative privileges for proper link management
 
 ### v3 New Features
+### v3.5 New Features
+- 🛡️ **Auto-Elevation** - Automatically requests admin rights on startup
+- 📋 **Activity Log** - View detailed operation history for each link in the dashboard
+- ♻️ **Auto-Rescan & Recovery** - Periodically checks targets and restores missing links automatically
+- ⏱️ **Adjustable Intervals** - Choose custom rescan durations (1 sec to 1 hour) for each link
+- 🎨 **Enhanced UI** - sleek rounded corners, modern container design, and updated branding icon
+- 📦 **Self-Contained Executable** - Single file distribution with correct icon and no console window
+
+### v3.0 New Features
 - 📋 **Multi-Link Support** - Create multiple independent link configurations in a single instance
 - 💾 **Persistent Settings** - Automatically saves/restores settings to `%TEMP%\symsync_settings.json`
 - 🔒 **Single Instance** - Prevents multiple instances from running simultaneously
@@ -21,13 +30,16 @@ A Windows utility that creates and maintains symbolic links between multiple sou
 
 ## 🚀 Getting Started
 
-1. Run `SymSync_v3.exe` as Administrator (required for creating symbolic links)
+1. Run `SymSync.exe` (it will auto-request Administrator rights)
 2. Click **"+ New Link"** to create a new link configuration
 3. Give your link a name (e.g., "Game Mods")
 4. Select a **Target Directory** using the Browse button
 5. Click **"+ Add"** to add one or more source directories
-6. Click **"▶ Start"** to create symlinks and begin monitoring
-7. Repeat for additional link configurations as needed
+6. Adjust the **Rescan Interval** if needed (default: 10 sec)
+7. Click **"▶ Start"** to create symlinks and begin monitoring
+8. Monitor progress in the **Activity Log** panel
+9. Repeat for additional link configurations as needed
+
 
 ## 🖥️ User Interface
 
@@ -78,7 +90,7 @@ pystray>=0.19.0
 ## 🛠️ Installation
 
 ### Option 1: Run the Executable
-Simply download and run `SymSync_v3.exe` as Administrator.
+Simply download and run `SymSync.exe`.
 
 ### Option 2: Run from Source
 1. Clone this repository
@@ -93,7 +105,7 @@ Simply download and run `SymSync_v3.exe` as Administrator.
 
 ### Build from Source
 ```bash
-py -m PyInstaller --clean symsync.spec
+pyinstaller --onefile --noconsole --name SymSync --hidden-import=pystray --hidden-import=PIL --icon=icon.ico SymSync.py
 ```
 
 ## 📁 Settings Storage
@@ -103,7 +115,7 @@ Settings are automatically saved to:
 %TEMP%\symsync_settings.json
 ```
 
-This includes all link configurations, sources, targets, and active states. Links that were active when the app closed will automatically restart when you reopen the app.
+This includes link configurations, sources, targets, active states, logs, and rescan intervals.
 
 ## 🤝 Contributing
 
@@ -132,6 +144,14 @@ This project is licensed under the GNU General Public License v3.0 (GPL-3.0) - s
 - Window size is 1050x720 pixels with resizable frame (minimum 900x600)
 
 ## 📜 Version History
+
+### v3.5 (2026-01-06)
+- **Auto-Elevation**: Script/Exe now intelligently requests admin rights
+- **Rescan & Recovery**: Automatically checks for and restores deleted/broken links
+- **Configurable Intervals**: Per-link dropdown for rescan frequency
+- **Activity Logging**: New right-pane log showing detailed operations and timestamps
+- **UI Refinement**: Rounded corners (RoundedFrame) and new "SS" purple branding
+- **Exe Build**: Proper icon integration and console suppression
 
 ### v3.0 (2026-01-05)
 - Multi-link support with dual-pane UI
