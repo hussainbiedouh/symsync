@@ -1,4 +1,4 @@
-# 📁 SymSync v3
+# 📁 SymSync v3.5
 
 A Windows utility that creates and maintains symbolic links between multiple source directories and a target directory, with real-time synchronization and system tray support! 🔄
 
